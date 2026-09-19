@@ -8,7 +8,7 @@ let filtroRel = { escola: '', prova: '', turma: '' };
 function itensRelatorio() {
   const f = filtroRel;
   return visiveis('resultados').map(r => {
-    const p = porId('provas', r.prova), a = porId('alunos', r.aluno), t = porId('turmas', p?.turma), e = porId('escolas', t?.escola);
+    const ap = porId('aplicacoes', r.aplicacao), p = porId('provas', ap?.prova), a = porId('alunos', r.aluno), t = porId('turmas', ap?.turma), e = porId('escolas', t?.escola);
     return { r, p, a, t, e, ...(p ? pontuar(p, r.respostas) : {}) };
   }).filter(x => x.p && x.a && x.t && x.e
     && (!f.escola || x.e.id === f.escola) && (!f.prova || x.p.id === f.prova) && (!f.turma || x.t.id === f.turma));
@@ -48,7 +48,8 @@ function relatorios() {
   if (!eGlobal()) f.escola = sessao.escola;
   const escolas = visiveis('escolas');
   const turmas = visiveis('turmas').filter(t => !f.escola || t.escola === f.escola);
-  const provas = visiveis('provas').filter(p => !f.escola || porId('turmas', p.turma)?.escola === f.escola);
+  const aplicVisiveis = visiveis('aplicacoes').filter(ap => !f.escola || porId('turmas', ap.turma)?.escola === f.escola);
+  const provas = [...new Map(aplicVisiveis.map(ap => [ap.prova, porId('provas', ap.prova)])).values()].filter(Boolean);
   if (f.turma && !turmas.some(t => t.id === f.turma)) f.turma = '';
   if (f.prova && !provas.some(p => p.id === f.prova)) f.prova = '';
 

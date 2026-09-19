@@ -2,7 +2,7 @@
 
 /* ---------- Armazenamento (localStorage) ---------- */
 const CHAVE = 'gabarito.v1';
-let db = { escolas: [], professores: [], turmas: [], alunos: [], provas: [], resultados: [], usuarios: [], solicitacoes: [] };
+let db = { escolas: [], professores: [], turmas: [], alunos: [], provas: [], aplicacoes: [], resultados: [], usuarios: [], solicitacoes: [] };
 let sessao = null; // usuário logado
 try { db = Object.assign(db, JSON.parse(localStorage.getItem(CHAVE)) || {}); } catch (e) {}
 const salvar = () => localStorage.setItem(CHAVE, JSON.stringify(db));
@@ -65,20 +65,30 @@ const ENT = {
     rotulo: a => a.nome,
   },
   provas: {
-    titulo: 'Provas', singular: 'Prova',
+    titulo: 'Banco de provas', singular: 'Prova',
     campos: [
       { k: 'titulo', r: 'Título da prova', obrig: 1 },
       { k: 'disciplina', r: 'Disciplina' },
-      { k: 'data', r: 'Data', tipo: 'date' },
-      { k: 'turma', r: 'Turma', ref: 'turmas', obrig: 1 },
-      { k: 'professor', r: 'Professor', ref: 'usuarios', filtro: u => u.perfil === 'professor' },
       { k: 'questoes', r: 'Quantidade de questões (1 a 100)', tipo: 'number', obrig: 1, min: 1, max: 100, padrao: 10 },
       { k: 'tipo', r: 'Tipo de pergunta', opcoes: ['Múltipla escolha – 5 opções (A a E)'], padrao: 'Múltipla escolha – 5 opções (A a E)' },
     ],
-    colunas: ['titulo', 'turma', 'questoes', 'data'],
+    colunas: ['titulo', 'disciplina', 'questoes'],
     rotulo: p => p.titulo,
     extras: [
       { r: 'Gabarito', f: 'editarGabarito' },
+    ],
+  },
+  aplicacoes: {
+    titulo: 'Provas aplicadas', singular: 'Aplicação de prova',
+    campos: [
+      { k: 'prova', r: 'Prova (banco de provas)', ref: 'provas', obrig: 1 },
+      { k: 'turma', r: 'Turma', ref: 'turmas', obrig: 1 },
+      { k: 'data', r: 'Data de aplicação', tipo: 'date' },
+      { k: 'professor', r: 'Professor', ref: 'usuarios', filtro: u => u.perfil === 'professor' },
+    ],
+    colunas: ['prova', 'turma', 'data'],
+    rotulo: ap => `${porId('provas', ap.prova)?.titulo ?? '?'} — ${nomeTurma(porId('turmas', ap.turma))}`,
+    extras: [
       { r: 'Folha', f: 'abrirFolhas', p: 1 },
       { r: 'Corrigir', f: 'corrigir', p: 1 },
       { r: 'Resultados', f: 'resultados' },
@@ -97,7 +107,10 @@ const PERM = {
   turmas:     { ver: TODOS, criar: TODOS, editar: TODOS, excluir: TODOS },
   alunos:     { ver: TODOS, criar: TODOS, editar: TODOS, excluir: TODOS },
   usuarios:   { ver: GERENTES, criar: GERENTES, editar: GERENTES, excluir: GERENTES },
+  // Banco de provas: só administrador e coordenador SEMED criam/editam/excluem provas e gabaritos.
   provas:     { ver: TODOS, criar: ['admin', 'semed'], editar: ['admin', 'semed'], excluir: ['admin', 'semed'] },
+  // Provas aplicadas: diretor e coordenador escolar selecionam uma prova do banco e vinculam à turma da sua escola.
+  aplicacoes: { ver: TODOS, criar: GERENTES, editar: GERENTES, excluir: GERENTES },
   relatorios: { ver: TODOS },
 };
 const ACOES = {
@@ -107,13 +120,14 @@ const ACOES = {
   resultados: TODOS,
   redefinirSenha: GERENTES,
 };
-const ABAS = ['escolas', 'turmas', 'alunos', 'usuarios', 'provas', 'relatorios'];
+const ABAS = ['escolas', 'turmas', 'alunos', 'usuarios', 'provas', 'aplicacoes', 'relatorios'];
 const dependentes = {
   escolas: [['turmas', 'escola'], ['usuarios', 'escola']],
-  turmas: [['alunos', 'turma'], ['provas', 'turma']],
-  usuarios: [['provas', 'professor']],
+  turmas: [['alunos', 'turma'], ['aplicacoes', 'turma']],
+  usuarios: [['aplicacoes', 'professor']],
   alunos: [['resultados', 'aluno']],
-  provas: [],
+  provas: [['aplicacoes', 'prova']],
+  aplicacoes: [['resultados', 'aplicacao']],
 };
 
 const eGlobal = () => GLOBAIS.includes(sessao?.perfil);
@@ -130,13 +144,14 @@ function visiveis(col) {
     const cri = perfisCriaveis();
     return db.usuarios.filter(u => cri.includes(u.perfil) && (eGlobal() || u.escola === escola));
   }
+  if (col === 'provas') return db.provas; // banco de provas: catálogo único, sem vínculo de escola, visível a todos
   if (eGlobal()) return db[col];
   switch (col) {
     case 'escolas': return db.escolas.filter(e => e.id === escola);
     case 'turmas': return db.turmas.filter(t => t.escola === escola);
     case 'alunos': return db.alunos.filter(a => escolaDaTurma(a.turma) === escola);
-    case 'provas': return db.provas.filter(p => escolaDaTurma(p.turma) === escola);
-    case 'resultados': { const ids = new Set(visiveis('provas').map(p => p.id)); return db.resultados.filter(r => ids.has(r.prova)); }
+    case 'aplicacoes': return db.aplicacoes.filter(ap => escolaDaTurma(ap.turma) === escola);
+    case 'resultados': { const ids = new Set(visiveis('aplicacoes').map(ap => ap.id)); return db.resultados.filter(r => ids.has(r.aplicacao)); }
   }
   return db[col];
 }
@@ -235,7 +250,7 @@ function excluir(id) {
   if (usados) return alert(`Não é possível excluir: há ${usados} registro(s) vinculado(s) a este item.`);
   if (!confirm('Excluir este registro?')) return;
   db[aba] = db[aba].filter(x => x.id !== id);
-  if (aba === 'provas') db.resultados = db.resultados.filter(r => r.prova !== id);
+  if (aba === 'aplicacoes') db.resultados = db.resultados.filter(r => r.aplicacao !== id);
   if (aba === 'usuarios') db.solicitacoes = db.solicitacoes.filter(s => s.usuario !== id);
   salvar(); listar();
 }
@@ -287,10 +302,11 @@ function editarGabarito(id) {
 
 /* ---------- Folha de respostas personalizada ---------- */
 function abrirFolhas(id) {
-  const p = porId('provas', id), turma = porId('turmas', p?.turma);
-  if (!podeAcao('abrirFolhas') || !visiveis('provas').includes(p)) return;
-  const alunos = db.alunos.filter(a => a.turma === p.turma).sort((a, b) => a.nome.localeCompare(b.nome));
-  form.innerHTML = `<h3>Folha de respostas – ${esc(p.titulo)}</h3>
+  const ap = porId('aplicacoes', id);
+  if (!podeAcao('abrirFolhas') || !visiveis('aplicacoes').includes(ap)) return;
+  const p = porId('provas', ap.prova), turma = porId('turmas', ap.turma);
+  const alunos = db.alunos.filter(a => a.turma === ap.turma).sort((a, b) => a.nome.localeCompare(b.nome));
+  form.innerHTML = `<h3>Folha de respostas – ${esc(p.titulo)} (${esc(nomeTurma(turma))})</h3>
     <div class="opcoes">
       <label><input type="radio" name="modo" value="turma" checked> Uma folha para cada aluno da turma (${alunos.length})</label>
       <label><input type="radio" name="modo" value="branco"> Folha em branco (aluno preenche o nome)</label>
@@ -300,18 +316,18 @@ function abrirFolhas(id) {
     if (ev.submitter?.value !== 'ok') return;
     const modo = new FormData(form).get('modo');
     if (modo === 'turma' && !alunos.length) { ev.preventDefault(); return alert('Esta turma não tem alunos cadastrados.'); }
-    mostrarFolhas(modo === 'turma' ? alunos.map(a => folhaHTML(p, turma, a)) : [folhaHTML(p, turma, null)]);
+    mostrarFolhas(modo === 'turma' ? alunos.map(a => folhaHTML(p, turma, a, ap)) : [folhaHTML(p, turma, null, ap)]);
   };
   dlg.showModal();
 }
 
-function folhaHTML(p, turma, aluno) {
+function folhaHTML(p, turma, aluno, ap) {
   const n = p.questoes, porCol = n <= 25 ? n : n <= 50 ? Math.ceil(n / 2) : n <= 75 ? Math.ceil(n / 3) : 25;
   const cols = [];
   for (let i = 0; i < n; i += porCol) cols.push(Array.from({ length: Math.min(porCol, n - i) }, (_, j) => i + j + 1));
-  const escola = porId('escolas', turma?.escola), prof = porId('professores', p.professor);
-  const data = p.data ? new Date(p.data + 'T00:00').toLocaleDateString('pt-BR') : '';
-  const cod = `${p.id}|${aluno ? aluno.id : 'BRANCO'}|${n}`;
+  const escola = porId('escolas', turma?.escola), prof = porId('usuarios', ap.professor);
+  const data = ap.data ? new Date(ap.data + 'T00:00').toLocaleDateString('pt-BR') : '';
+  const cod = `${ap.id}|${aluno ? aluno.id : 'BRANCO'}|${n}`;
   return `<div class="folha">
     <i class="marca m1"></i><i class="marca m2"></i><i class="marca m3"></i><i class="marca m4"></i>
     <h2>FOLHA DE RESPOSTAS</h2>
@@ -347,10 +363,10 @@ function mostrarFolhas(lista) {
 
 /* ---------- Leitura óptica (OMR) ---------- */
 // Posições (em mm) dos marcadores e das bolhas, medidas no próprio layout da folha.
-function medirFolha(p, turma) {
+function medirFolha(p, turma, ap) {
   const box = document.createElement('div');
   box.style.cssText = 'position:absolute;left:-9999px;top:0';
-  box.innerHTML = folhaHTML(p, turma, null);
+  box.innerHTML = folhaHTML(p, turma, null, ap);
   document.body.appendChild(box);
   const f = box.firstElementChild, r0 = f.getBoundingClientRect(), k = 210 / r0.width;
   const centro = el => { const r = el.getBoundingClientRect(); return [(r.left + r.width / 2 - r0.left) * k, (r.top + r.height / 2 - r0.top) * k]; };
@@ -455,10 +471,10 @@ function fracaoEscura(b, W, H, cx, cy, r) {
 }
 
 // Devolve as respostas ('' = em branco, '*' = mais de uma marcada) e a imagem com a leitura desenhada.
-async function lerFolha(file, p, turma) {
+async function lerFolha(file, p, turma, ap) {
   const img = await carregarImagem(file);
   const { W, H, b, cv } = binarizar(img);
-  const geo = medirFolha(p, turma), cand = acharQuadrados(b, W, H);
+  const geo = medirFolha(p, turma, ap), cand = acharQuadrados(b, W, H);
   const cantos = [[1, 1], [0, 1], [1, 0], [0, 0]].map(([esq, topo]) =>
     cand.filter(o => (o.x < W / 2) === !!esq && (o.y < H / 2) === !!topo).sort((a, c) => c.area - a.area)[0]);
   if (cantos.some(c => !c)) throw new Error('Não encontrei os 4 marcadores pretos dos cantos. Fotografe a folha inteira, de cima, com boa luz e sem cortar os cantos.');
@@ -489,14 +505,15 @@ const pctDe = (a, t) => t ? Math.round(a / t * 100) + '%' : '—';
 dlg.addEventListener('close', () => { dlg.className = ''; });
 
 function corrigir(id) {
-  const p = porId('provas', id), turma = porId('turmas', p?.turma);
-  if (!podeAcao('corrigir') || !visiveis('provas').includes(p)) return;
-  const alunos = db.alunos.filter(a => a.turma === p.turma).sort((a, b) => a.nome.localeCompare(b.nome));
+  const ap = porId('aplicacoes', id);
+  if (!podeAcao('corrigir') || !visiveis('aplicacoes').includes(ap)) return;
+  const p = porId('provas', ap.prova), turma = porId('turmas', ap.turma);
+  const alunos = db.alunos.filter(a => a.turma === ap.turma).sort((a, b) => a.nome.localeCompare(b.nome));
   if (!alunos.length) return alert('Esta turma não tem alunos cadastrados.');
-  if (!(p.gabarito || []).some(Boolean)) return alert('Preencha o gabarito da prova antes de corrigir (botão "Gabarito").');
+  if (!(p.gabarito || []).some(Boolean)) return alert('Preencha o gabarito da prova antes de corrigir (no Banco de provas, botão "Gabarito").');
   let resp = Array(p.questoes).fill('');
-  const feito = a => db.resultados.some(r => r.prova === id && r.aluno === a.id);
-  form.innerHTML = `<h3>Corrigir – ${esc(p.titulo)}</h3>
+  const feito = a => db.resultados.some(r => r.aplicacao === id && r.aluno === a.id);
+  form.innerHTML = `<h3>Corrigir – ${esc(p.titulo)} (${esc(nomeTurma(turma))})</h3>
     <label>Aluno *</label>
     <select name="aluno" required><option value="">— selecione —</option>${alunos.map(a => `<option value="${a.id}">${esc(a.nome)} (${esc(a.matricula)})${feito(a) ? ' ✓ já corrigido' : ''}</option>`).join('')}</select>
     <label>Foto ou scan da folha preenchida (opcional – você também pode marcar as respostas manualmente)</label>
@@ -524,7 +541,7 @@ function corrigir(id) {
     if (!f) return;
     msg.className = 'msg'; msg.textContent = 'Lendo a folha…';
     try {
-      const r = await lerFolha(f, p, turma);
+      const r = await lerFolha(f, p, turma, ap);
       resp = r.respostas; pintar();
       const duv = resp.filter(v => v === '' || v === '*').length;
       msg.textContent = `Leitura concluída. ${duv ? duv + ' questão(ões) em branco ou com mais de uma marca (destacadas em amarelo) – confira. ' : ''}Compare com a imagem abaixo e corrija o que for preciso.`;
@@ -535,8 +552,8 @@ function corrigir(id) {
     if (ev.submitter?.value !== 'ok') return;
     const aluno = new FormData(form).get('aluno'), s = pontuar(p, resp);
     if (feito({ id: aluno }) && !confirm('Este aluno já tem resultado nesta prova. Substituir?')) return ev.preventDefault();
-    db.resultados = db.resultados.filter(r => !(r.prova === id && r.aluno === aluno));
-    db.resultados.push({ id: novoId(), prova: id, aluno, respostas: resp, ...s });
+    db.resultados = db.resultados.filter(r => !(r.aplicacao === id && r.aluno === aluno));
+    db.resultados.push({ id: novoId(), aplicacao: id, aluno, respostas: resp, ...s });
     salvar(); listar();
   };
   pintar();
@@ -545,13 +562,14 @@ function corrigir(id) {
 }
 
 function resultados(id) {
-  const p = porId('provas', id);
-  if (!podeAcao('resultados') || !visiveis('provas').includes(p)) return;
-  const alunos = db.alunos.filter(a => a.turma === p.turma).sort((a, b) => a.nome.localeCompare(b.nome));
-  const res = a => db.resultados.find(r => r.prova === id && r.aluno === a.id);
+  const ap = porId('aplicacoes', id);
+  if (!podeAcao('resultados') || !visiveis('aplicacoes').includes(ap)) return;
+  const p = porId('provas', ap.prova), turma = porId('turmas', ap.turma);
+  const alunos = db.alunos.filter(a => a.turma === ap.turma).sort((a, b) => a.nome.localeCompare(b.nome));
+  const res = a => db.resultados.find(r => r.aplicacao === id && r.aluno === a.id);
   const feitos = alunos.map(res).filter(Boolean);
   form.onsubmit = null;
-  form.innerHTML = `<h3>Resultados – ${esc(p.titulo)}</h3>
+  form.innerHTML = `<h3>Resultados – ${esc(p.titulo)} (${esc(nomeTurma(turma))})</h3>
     <table><thead><tr><th>Matrícula</th><th>Aluno</th><th>Acertos</th><th>% de acertos</th><th></th></tr></thead><tbody>
     ${alunos.map(a => { const r = res(a); return `<tr><td>${esc(a.matricula)}</td><td>${esc(a.nome)}</td>
       <td>${r ? `${r.acertos}/${r.total}` : '—'}</td><td>${r ? pctDe(r.acertos, r.total) : '—'}</td>
@@ -570,16 +588,16 @@ function apagarResultado(rid, pid) {
 }
 
 function exportarCSV(id) {
-  const p = porId('provas', id);
+  const ap = porId('aplicacoes', id), p = porId('provas', ap.prova), turma = porId('turmas', ap.turma);
   const linhas = [['Matrícula', 'Aluno', 'Acertos', 'Total', '% acertos', ...Array.from({ length: p.questoes }, (_, i) => 'Q' + (i + 1))]];
-  db.alunos.filter(a => a.turma === p.turma).sort((a, b) => a.nome.localeCompare(b.nome)).forEach(a => {
-    const r = db.resultados.find(x => x.prova === id && x.aluno === a.id);
+  db.alunos.filter(a => a.turma === ap.turma).sort((a, b) => a.nome.localeCompare(b.nome)).forEach(a => {
+    const r = db.resultados.find(x => x.aplicacao === id && x.aluno === a.id);
     linhas.push([a.matricula, a.nome, r?.acertos ?? '', r?.total ?? '', r ? pctDe(r.acertos, r.total) : '', ...(r ? r.respostas : [])]);
   });
   const csv = linhas.map(l => l.map(c => `"${String(c).replace(/"/g, '""')}"`).join(';')).join('\r\n');
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }));
-  a.download = `resultados-${p.titulo.replace(/\W+/g, '_')}.csv`;
+  a.download = `resultados-${p.titulo.replace(/\W+/g, '_')}-${turma.nome.replace(/\W+/g, '_')}.csv`;
   a.click();
 }
 

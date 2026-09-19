@@ -40,6 +40,15 @@ async function prepararDados() {
     mudou = true;
   }
   db.professores = [];
+  // provas da versão anterior traziam turma/professor/data no próprio registro: viram um item do banco de provas
+  // (sem turma) + uma "prova aplicada" vinculando essa prova à turma; os resultados passam a apontar para a aplicação.
+  for (const p of db.provas.filter(p => p.turma)) {
+    const ap = { id: novoId(), prova: p.id, turma: p.turma, data: p.data || '', professor: p.professor || '' };
+    db.aplicacoes.push(ap);
+    db.resultados.forEach(r => { if (r.prova === p.id) { r.aplicacao = ap.id; delete r.prova; } });
+    delete p.turma; delete p.professor; delete p.data;
+    mudou = true;
+  }
   if (!db.usuarios.some(u => u.perfil === 'admin')) {
     db.usuarios.push({ id: novoId(), nome: 'Administrador', login: 'admin', email: '', perfil: 'admin', escola: '', ...(await criarSenha('admin123')), trocar: true });
     mudou = true;
