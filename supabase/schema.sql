@@ -3,7 +3,29 @@
 --
 -- Como aplicar: no painel do Supabase, vá em "SQL Editor" -> "New query",
 -- cole todo este arquivo e clique em "Run". Pode ser executado do zero
--- num projeto novo.
+-- num projeto novo, e também rodado de novo com segurança (o bloco abaixo
+-- apaga qualquer versão anterior destas tabelas/funções antes de recriar).
+-- Só use isto enquanto o banco ainda não tiver dados reais.
+
+-- ========== Reset (idempotente) ==========
+
+drop table if exists public.solicitacoes cascade;
+drop table if exists public.resultados cascade;
+drop table if exists public.aplicacoes cascade;
+drop table if exists public.provas cascade;
+drop table if exists public.alunos cascade;
+drop table if exists public.turmas cascade;
+drop table if exists public.usuarios cascade;
+drop table if exists public.escolas cascade;
+drop function if exists public.solicitar_redefinicao(text);
+drop function if exists public.email_do_login(text);
+drop function if exists public.perfil_criavel(text);
+drop function if exists public.escola_da_turma(uuid);
+drop function if exists public.eh_gerente();
+drop function if exists public.eh_global();
+drop function if exists public.meu_usuario_id();
+drop function if exists public.minha_escola();
+drop function if exists public.meu_perfil();
 
 -- ========== Tabelas ==========
 
