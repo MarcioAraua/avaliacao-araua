@@ -106,7 +106,7 @@ function telaLogin(modo = 'entrar', uid = null) {
       <button class="entrar" type="submit">Salvar e entrar</button>
       <button class="link" type="button" id="voltar">Cancelar</button>
       <div id="msg"></div></form>`;
-  el.innerHTML = lado + `<div class="login-caixa">${caixa}</div>`;
+  el.innerHTML = lado + `<div class="login-caixa"><img class="logo-oficial" src="logo-semed.png" alt="Prefeitura de Arauá – Secretaria Municipal de Educação">${caixa}</div>`;
 
   const f = el.querySelector('#lf'), msg = el.querySelector('#msg'), btn = f.querySelector('.entrar');
   const aviso = (t, ok) => { msg.className = ok ? 'ok' : 'erro'; msg.textContent = t; };
