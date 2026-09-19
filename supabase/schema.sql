@@ -140,7 +140,7 @@ $$;
 -- que o papel "anon" normalmente não acessa (chamada acontece antes do login).
 create or replace function public.email_do_login(login_param text) returns text
 language sql security definer stable set search_path = public as $$
-  select email from auth.users u
+  select u.email from auth.users u
   join public.usuarios us on us.auth_id = u.id
   where lower(us.login) = lower(login_param)
 $$;
