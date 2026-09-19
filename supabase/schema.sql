@@ -136,12 +136,15 @@ $$;
 
 -- Login -> e-mail sintético usado para autenticar no Supabase Auth
 -- (o app usa "usuário" como identificador, não e-mail; ver auth.js).
+-- security definer: roda com privilégio elevado para poder ler auth.users,
+-- que o papel "anon" normalmente não acessa (chamada acontece antes do login).
 create or replace function public.email_do_login(login_param text) returns text
-language sql stable set search_path = public as $$
+language sql security definer stable set search_path = public as $$
   select email from auth.users u
   join public.usuarios us on us.auth_id = u.id
   where lower(us.login) = lower(login_param)
 $$;
+grant execute on function public.email_do_login(text) to anon, authenticated;
 
 -- ========== RLS ==========
 
