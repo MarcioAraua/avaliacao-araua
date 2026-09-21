@@ -1,14 +1,22 @@
 'use strict';
 
-/* ---------- Armazenamento (localStorage) ---------- */
-const CHAVE = 'gabarito.v1';
-let db = { escolas: [], professores: [], turmas: [], alunos: [], provas: [], aplicacoes: [], resultados: [], usuarios: [], solicitacoes: [] };
-let sessao = null; // usuário logado
-try { db = Object.assign(db, JSON.parse(localStorage.getItem(CHAVE)) || {}); } catch (e) {}
-const salvar = () => localStorage.setItem(CHAVE, JSON.stringify(db));
-const novoId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+/* ---------- Dados (cache local sincronizado com o Supabase a cada login/alteração) ---------- */
+let db = { escolas: [], usuarios: [], turmas: [], alunos: [], provas: [], aplicacoes: [], resultados: [], solicitacoes: [] };
+let sessao = null; // usuário logado (linha da tabela "usuarios")
 const porId = (col, id) => db[col].find(x => x.id === id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// Carrega (ou recarrega) tudo que as políticas de RLS liberam para o usuário logado.
+async function carregarDados() {
+  const tabelas = ['escolas', 'usuarios', 'turmas', 'alunos', 'provas', 'aplicacoes', 'resultados', 'solicitacoes'];
+  const resp = await Promise.all(tabelas.map(t => sb.from(t).select('*')));
+  resp.forEach((r, i) => { if (r.error) throw r.error; db[tabelas[i]] = r.data || []; });
+}
+
+// Extrai a mensagem de erro de uma Edge Function do Supabase (usada por sb.functions.invoke).
+async function mensagemErroFuncao(error) {
+  try { const body = await error.context.json(); return body?.error || error.message; } catch { return error.message; }
+}
 
 const LETRAS = ['A', 'B', 'C', 'D', 'E'];
 const PERFIS = { admin: 'Administrador', semed: 'Coordenador SEMED', diretor: 'Diretor', coordenador: 'Coordenador escolar', professor: 'Professor' };
@@ -97,7 +105,9 @@ const ENT = {
 };
 
 /* ---------- Perfis e permissões ---------- */
-// Para mudar quem pode fazer o quê, edite apenas as tabelas PERM e ACOES abaixo.
+// Para mudar quem pode fazer o quê, edite as tabelas PERM/ACOES abaixo E as políticas
+// equivalentes em supabase/schema.sql (a segurança de verdade está no banco, via RLS;
+// isto aqui só controla o que a interface mostra).
 const TODOS = Object.keys(PERFIS);
 const GLOBAIS = ['admin', 'semed'];                       // enxergam todas as escolas
 const GERENTES = ['admin', 'semed', 'diretor', 'coordenador'];
@@ -138,6 +148,7 @@ function perfisCriaveis() {
 }
 
 // Registros que o usuário logado pode ver: administrador e SEMED veem tudo; os demais, só a própria escola.
+// (Isto é só para a interface: quem realmente decide o que cada um vê é a Row Level Security no banco.)
 function visiveis(col) {
   const escola = sessao.escola, escolaDaTurma = id => porId('turmas', id)?.escola;
   if (col === 'usuarios') {
@@ -225,7 +236,8 @@ function editar(id) {
     } else ctl = `<input name="${c.k}" type="${c.tipo || 'text'}" value="${esc(v)}" ${c.obrig ? 'required' : ''} ${c.min ? `min="${c.min}"` : ''} ${c.max ? `max="${c.max}"` : ''}>`;
     return `<label>${esc(c.r)}${c.obrig ? ' *' : ''}</label>${ctl}`;
   }).join('') + `<div class="rodape-form"><button type="button" class="s" onclick="dlg.close()">Cancelar</button><button class="p" value="ok">Salvar</button></div>`;
-  form.onsubmit = ev => {
+  form.onsubmit = async ev => {
+    ev.preventDefault();
     if (ev.submitter?.value !== 'ok') return;
     const dados = Object.fromEntries(new FormData(form));
     if (!eGlobal() && cfg.campos.some(c => c.k === 'escola')) dados.escola = sessao.escola;
@@ -234,53 +246,78 @@ function editar(id) {
       // se reduziu o nº de questões, descarta gabarito excedente
       if (reg.gabarito) dados.gabarito = reg.gabarito.slice(0, dados.questoes);
     }
+    // campo de referência/data/número vazio vira null (coluna do banco não aceita string vazia)
+    cfg.campos.forEach(c => { if ((c.ref || c.tipo === 'date' || c.tipo === 'number') && dados[c.k] === '') dados[c.k] = null; });
     const erro = cfg.validar?.(dados, reg, id);
-    if (erro) { ev.preventDefault(); return alert(erro); }
-    if (id) Object.assign(reg, dados); else if (cfg.novo) cfg.novo(dados); else db[aba].push({ id: novoId(), ...dados });
-    salvar(); listar();
+    if (erro) return alert(erro);
+    try {
+      if (id) {
+        const { error } = await sb.from(aba).update(dados).eq('id', id);
+        if (error) throw error;
+        Object.assign(reg, dados);
+        dlg.close(); listar();
+      } else if (cfg.novo) {
+        await cfg.novo(dados); // cuida de gravar, fechar o diálogo, atualizar a lista e avisar o usuário
+      } else {
+        const { data, error } = await sb.from(aba).insert(dados).select().single();
+        if (error) throw error;
+        db[aba].push(data);
+        dlg.close(); listar();
+      }
+    } catch (e) { alert('Erro ao salvar: ' + e.message); }
   };
   dlg.showModal();
 }
 
-function excluir(id) {
+async function excluir(id) {
   const reg = porId(aba, id);
   if (!reg || !pode('excluir', aba) || !visiveis(aba).includes(reg)) return;
   if (aba === 'usuarios' && id === sessao.id) return alert('Você não pode excluir o seu próprio usuário.');
   const usados = (dependentes[aba] || []).reduce((n, [col, campo]) => n + db[col].filter(x => x[campo] === id).length, 0);
   if (usados) return alert(`Não é possível excluir: há ${usados} registro(s) vinculado(s) a este item.`);
   if (!confirm('Excluir este registro?')) return;
+  const { error } = await sb.from(aba).delete().eq('id', id);
+  if (error) return alert('Erro ao excluir: ' + error.message);
   db[aba] = db[aba].filter(x => x.id !== id);
   if (aba === 'aplicacoes') db.resultados = db.resultados.filter(r => r.aplicacao !== id);
   if (aba === 'usuarios') db.solicitacoes = db.solicitacoes.filter(s => s.usuario !== id);
-  salvar(); listar();
+  listar();
 }
 
 /* ---------- Usuários ---------- */
 function validarUsuario(d, reg, id) {
   d.login = d.login.trim().toLowerCase();
-  if (GLOBAIS.includes(d.perfil)) d.escola = '';
+  if (GLOBAIS.includes(d.perfil)) d.escola = null;
   if (db.usuarios.some(u => u.login.toLowerCase() === d.login && u.id !== id)) return 'Já existe um usuário com este login.';
   if (!perfisCriaveis().includes(d.perfil)) return 'Você não tem permissão para cadastrar este perfil.';
   if (id && id === sessao.id && d.perfil !== reg.perfil) return 'Você não pode alterar o seu próprio perfil.';
   if (!GLOBAIS.includes(d.perfil) && !d.escola) return 'Selecione a escola do usuário.';
 }
 
+// Cria o usuário via Edge Function (precisa de privilégio elevado para criar o login
+// no Supabase Auth; o cliente comum, mesmo administrador, não pode fazer isso sozinho).
 async function novoUsuario(d) {
-  const temp = senhaTemporaria();
-  db.usuarios.push({ id: novoId(), ...d, ...(await criarSenha(temp)), trocar: true, criadoPor: sessao.id });
-  salvar(); listar();
-  alert(`Usuário cadastrado.\n\nLogin: ${d.login}\nSenha temporária: ${temp}\n\nInforme estes dados ao usuário. A troca da senha será exigida no primeiro acesso.`);
+  try {
+    const { data, error } = await sb.functions.invoke('criar-usuario', { body: d });
+    if (error) throw new Error(await mensagemErroFuncao(error));
+    db.usuarios.push(data.usuario);
+    dlg.close(); listar();
+    alert(`Usuário cadastrado.\n\nLogin: ${data.usuario.login}\nSenha temporária: ${data.senhaTemporaria}\n\nInforme estes dados ao usuário. A troca da senha será exigida no primeiro acesso.`);
+  } catch (e) { alert('Erro ao cadastrar usuário: ' + e.message); }
 }
 
 async function redefinirSenha(id) {
   const u = porId('usuarios', id);
   if (!u || !podeAcao('redefinirSenha') || !visiveis('usuarios').includes(u)) return;
   if (!confirm(`Gerar uma nova senha temporária para ${u.nome}?`)) return;
-  const temp = senhaTemporaria();
-  Object.assign(u, await criarSenha(temp), { trocar: true });
-  db.solicitacoes.forEach(s => { if (s.usuario === id) s.atendida = true; });
-  salvar(); listar();
-  alert(`Nova senha temporária de ${u.nome}: ${temp}\n\nInforme ao usuário. Ele deverá trocá-la no próximo acesso.`);
+  try {
+    const { data, error } = await sb.functions.invoke('redefinir-senha', { body: { usuarioId: id } });
+    if (error) throw new Error(await mensagemErroFuncao(error));
+    u.trocar_senha = true;
+    db.solicitacoes.forEach(s => { if (s.usuario === id) s.atendida = true; });
+    listar();
+    alert(`Nova senha temporária de ${u.nome}: ${data.senhaTemporaria}\n\nInforme ao usuário. Ele deverá trocá-la no próximo acesso.`);
+  } catch (e) { alert('Erro ao redefinir senha: ' + e.message); }
 }
 
 /* ---------- Gabarito oficial da prova ---------- */
@@ -291,11 +328,17 @@ function editarGabarito(id) {
     Array.from({ length: p.questoes }, (_, i) =>
       `<label>${i + 1}<select name="q${i}"><option value="">–</option>${LETRAS.map(l => `<option ${gab[i] === l ? 'selected' : ''}>${l}</option>`).join('')}</select></label>`).join('') +
     `</div><div class="rodape-form"><button type="button" class="s" onclick="dlg.close()">Cancelar</button><button class="p" value="ok">Salvar</button></div>`;
-  form.onsubmit = ev => {
+  form.onsubmit = async ev => {
+    ev.preventDefault();
     if (ev.submitter?.value !== 'ok') return;
     const fd = new FormData(form);
-    p.gabarito = Array.from({ length: p.questoes }, (_, i) => fd.get('q' + i) || '');
-    salvar(); listar();
+    const gabarito = Array.from({ length: p.questoes }, (_, i) => fd.get('q' + i) || '');
+    try {
+      const { error } = await sb.from('provas').update({ gabarito }).eq('id', id);
+      if (error) throw error;
+      p.gabarito = gabarito;
+      dlg.close(); listar();
+    } catch (e) { alert('Erro ao salvar o gabarito: ' + e.message); }
   };
   dlg.showModal();
 }
@@ -548,13 +591,26 @@ function corrigir(id) {
       const box = form.querySelector('#cor-img'); box.innerHTML = ''; r.canvas.className = 'prev'; box.appendChild(r.canvas);
     } catch (err) { msg.className = 'msg erro'; msg.textContent = err.message; }
   };
-  form.onsubmit = ev => {
+  form.onsubmit = async ev => {
+    ev.preventDefault();
     if (ev.submitter?.value !== 'ok') return;
     const aluno = new FormData(form).get('aluno'), s = pontuar(p, resp);
-    if (feito({ id: aluno }) && !confirm('Este aluno já tem resultado nesta prova. Substituir?')) return ev.preventDefault();
-    db.resultados = db.resultados.filter(r => !(r.aplicacao === id && r.aluno === aluno));
-    db.resultados.push({ id: novoId(), aplicacao: id, aluno, respostas: resp, ...s });
-    salvar(); listar();
+    if (!aluno) return;
+    if (feito({ id: aluno }) && !confirm('Este aluno já tem resultado nesta prova. Substituir?')) return;
+    try {
+      const existente = db.resultados.find(r => r.aplicacao === id && r.aluno === aluno);
+      const linha = { aplicacao: id, aluno, respostas: resp, ...s };
+      if (existente) {
+        const { error } = await sb.from('resultados').update(linha).eq('id', existente.id);
+        if (error) throw error;
+        Object.assign(existente, linha);
+      } else {
+        const { data, error } = await sb.from('resultados').insert(linha).select().single();
+        if (error) throw error;
+        db.resultados.push(data);
+      }
+      dlg.close(); listar();
+    } catch (e) { alert('Erro ao salvar resultado: ' + e.message); }
   };
   pintar();
   dlg.className = 'largo';
@@ -581,10 +637,12 @@ function resultados(id) {
   if (!dlg.open) dlg.showModal();
 }
 
-function apagarResultado(rid, pid) {
+async function apagarResultado(rid, pid) {
   if (!confirm('Remover este resultado?')) return;
+  const { error } = await sb.from('resultados').delete().eq('id', rid);
+  if (error) return alert('Erro ao remover: ' + error.message);
   db.resultados = db.resultados.filter(r => r.id !== rid);
-  salvar(); resultados(pid);
+  resultados(pid);
 }
 
 function exportarCSV(id) {

@@ -1,65 +1,29 @@
 'use strict';
 
-/* ---------- Senhas ---------- */
-const CHAVE_SESSAO = 'gabarito.sessao';
-const codificar = new TextEncoder();
-
-async function derivar(senha, sal) {
-  if (!window.crypto?.subtle) { // ambiente sem WebCrypto: hash simples (menos seguro)
-    let h = 5381;
-    for (const c of sal + senha) h = (h * 33 + c.charCodeAt(0)) >>> 0;
-    return 'x' + h;
-  }
-  const chave = await crypto.subtle.importKey('raw', codificar.encode(senha), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: codificar.encode(sal), iterations: 100000, hash: 'SHA-256' }, chave, 256);
-  return btoa(String.fromCharCode(...new Uint8Array(bits)));
-}
-async function criarSenha(senha) {
-  const sal = novoId() + novoId();
-  return { sal, hash: await derivar(senha, sal) };
-}
-async function senhaConfere(u, senha) { return (await derivar(senha, u.sal)) === u.hash; }
+/* ---------- Senhas temporárias (a senha em si é gerenciada pelo Supabase Auth) ---------- */
 function senhaTemporaria() {
   const alfabeto = 'abcdefghjkmnpqrstuvwxyz23456789';
   return [...crypto.getRandomValues(new Uint32Array(8))].map(n => alfabeto[n % alfabeto.length]).join('');
 }
 
-/* ---------- Dados iniciais e migração ---------- */
-function gerarLogin(nome, email) {
-  const base = ((email || '').split('@')[0] || nome).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\W+/g, '.').replace(/^\.|\.$/g, '') || 'usuario';
-  let login = base, n = 1;
-  while (db.usuarios.some(u => u.login === login)) login = base + (++n);
-  return login;
-}
-async function prepararDados() {
-  let mudou = false;
-  // professores cadastrados na versão anterior viram usuários (a senha deve ser redefinida por um gestor)
-  for (const p of db.professores) {
-    db.usuarios.push({ id: p.id, nome: p.nome, login: gerarLogin(p.nome, p.email), email: p.email || '', perfil: 'professor',
-      disciplina: p.disciplina || '', escola: p.escola, ...(await criarSenha(senhaTemporaria())), trocar: true });
-    mudou = true;
-  }
-  db.professores = [];
-  // provas da versão anterior traziam turma/professor/data no próprio registro: viram um item do banco de provas
-  // (sem turma) + uma "prova aplicada" vinculando essa prova à turma; os resultados passam a apontar para a aplicação.
-  for (const p of db.provas.filter(p => p.turma)) {
-    const ap = { id: novoId(), prova: p.id, turma: p.turma, data: p.data || '', professor: p.professor || '' };
-    db.aplicacoes.push(ap);
-    db.resultados.forEach(r => { if (r.prova === p.id) { r.aplicacao = ap.id; delete r.prova; } });
-    delete p.turma; delete p.professor; delete p.data;
-    mudou = true;
-  }
-  if (!db.usuarios.some(u => u.perfil === 'admin')) {
-    db.usuarios.push({ id: novoId(), nome: 'Administrador', login: 'admin', email: '', perfil: 'admin', escola: '', ...(await criarSenha('admin123')), trocar: true });
-    mudou = true;
-  }
-  if (mudou) salvar();
+/* ---------- Sessão / inicialização ---------- */
+async function buscarUsuarioPorAuthId(authId) {
+  const { data, error } = await sb.from('usuarios').select('*').eq('auth_id', authId).maybeSingle();
+  if (error) throw error;
+  return data;
 }
 
 async function iniciar() {
-  await prepararDados();
-  const u = porId('usuarios', sessionStorage.getItem(CHAVE_SESSAO));
-  if (u && !u.trocar) entrar(u); else telaLogin('entrar');
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    if (session) {
+      const u = await buscarUsuarioPorAuthId(session.user.id);
+      if (u && u.trocar_senha) return telaLogin('trocar', u.id);
+      if (u) return entrar(u);
+      await sb.auth.signOut(); // sessão órfã (sem linha correspondente em "usuarios")
+    }
+  } catch (e) { /* segue para a tela de login */ }
+  telaLogin('entrar');
 }
 
 /* ---------- Tela de login ---------- */
@@ -91,7 +55,6 @@ function telaLogin(modo = 'entrar', uid = null) {
   const lado = `<div class="login-lado">${LOGO}
     <h1>Secretaria Municipal de Educação de Arauá</h1><div class="linha"></div>
     <p>Sistema de Gestão de Avaliações</p></div>`;
-  const admin = db.usuarios.find(u => u.login === 'admin');
   const campoSenha = (nome, rotulo, auto) => `<label>${rotulo}</label><div class="campo-senha"><input name="${nome}" type="password" autocomplete="${auto}" required>
     <button type="button" data-ver>mostrar</button></div>`;
   let caixa;
@@ -102,7 +65,6 @@ function telaLogin(modo = 'entrar', uid = null) {
       <button class="entrar" type="submit">Entrar</button>
       <button class="link" type="button" id="esqueci">Esqueceu a senha?</button>
       <div id="msg"></div>
-      ${admin?.trocar ? '<div class="primeiro"><b>Primeiro acesso:</b> usuário <b>admin</b> e senha <b>admin123</b>. A troca da senha será exigida.</div>' : ''}
     </form>`;
   else if (modo === 'esqueci') caixa = `<form class="login-form" id="lf">
       <h2>Recuperar acesso</h2><p class="dica">Informe seu usuário ou e-mail. A solicitação será enviada ao administrador ou ao responsável pelo seu cadastro, que informará uma senha temporária.</p>
@@ -135,44 +97,57 @@ function telaLogin(modo = 'entrar', uid = null) {
     try {
       if (modo === 'entrar') {
         if (Date.now() < bloqueadoAte) return aviso(`Muitas tentativas. Aguarde ${Math.ceil((bloqueadoAte - Date.now()) / 1000)} s.`);
-        const u = db.usuarios.find(x => x.login.toLowerCase() === d.login.trim().toLowerCase());
-        if (!u || !(await senhaConfere(u, d.senha))) {
+        const login = d.login.trim().toLowerCase();
+        const { data: email } = await sb.rpc('email_do_login', { login_param: login });
+        const { data: signIn, error } = email
+          ? await sb.auth.signInWithPassword({ email, password: d.senha })
+          : { data: null, error: true };
+        if (!signIn || error) {
           if (++falhas >= 5) { bloqueadoAte = Date.now() + 30000; falhas = 0; }
           return aviso('Usuário ou senha inválidos.');
         }
         falhas = 0;
-        if (u.trocar) return telaLogin('trocar', u.id);
+        const u = await buscarUsuarioPorAuthId(signIn.user.id);
+        if (!u) { await sb.auth.signOut(); return aviso('Usuário sem cadastro no sistema. Contate o administrador.'); }
+        if (u.trocar_senha) return telaLogin('trocar', u.id);
         entrar(u);
       } else if (modo === 'esqueci') {
-        const chave = d.id.trim().toLowerCase();
-        const u = db.usuarios.find(x => x.login.toLowerCase() === chave || (x.email && x.email.toLowerCase() === chave));
-        if (u && !db.solicitacoes.some(s => s.usuario === u.id && !s.atendida))
-          { db.solicitacoes.push({ id: novoId(), usuario: u.id, data: new Date().toISOString(), atendida: false }); salvar(); }
+        await sb.rpc('solicitar_redefinicao', { login_ou_email: d.id.trim() });
         aviso('Solicitação registrada. Procure o administrador ou o responsável pelo seu cadastro para receber a senha temporária.', true);
       } else {
         if (d.nova.length < 6) return aviso('A senha deve ter pelo menos 6 caracteres.');
         if (d.nova !== d.conf) return aviso('As senhas não conferem.');
-        if (d.nova === 'admin123') return aviso('Escolha uma senha diferente da senha padrão.');
-        const u = porId('usuarios', uid);
-        Object.assign(u, await criarSenha(d.nova), { trocar: false });
-        salvar(); entrar(u);
+        const { error: erroSenha } = await sb.auth.updateUser({ password: d.nova });
+        if (erroSenha) return aviso('Não foi possível alterar a senha: ' + erroSenha.message);
+        const { error: erroUsuario } = await sb.from('usuarios').update({ trocar_senha: false }).eq('id', uid);
+        if (erroUsuario) return aviso('Senha alterada, mas houve um erro ao atualizar o cadastro: ' + erroUsuario.message);
+        const { data: { user } } = await sb.auth.getUser();
+        entrar(await buscarUsuarioPorAuthId(user.id));
       }
+    } catch (e) {
+      aviso('Erro: ' + e.message);
     } finally { btn.disabled = false; }
   };
 }
 
 /* ---------- Sessão ---------- */
-function entrar(u) {
+async function entrar(u) {
   sessao = u;
-  sessionStorage.setItem(CHAVE_SESSAO, u.id);
+  try {
+    await carregarDados();
+  } catch (e) {
+    alert('Não foi possível carregar os dados do sistema: ' + e.message);
+    return sair();
+  }
   document.body.classList.remove('deslogado');
   document.getElementById('usuario').innerHTML = `<div><b>${esc(u.nome)}</b><span>${PERFIS[u.perfil]}${u.escola ? ' · ' + esc(porId('escolas', u.escola)?.nome ?? '') : ''}</span></div>
     <button onclick="alterarSenha()">Alterar senha</button><button onclick="sair()">Sair</button>`;
   aba = abasVisiveis().includes('turmas') ? 'turmas' : abasVisiveis()[0];
   menu(); listar();
 }
-function sair() {
-  sessionStorage.removeItem(CHAVE_SESSAO);
+async function sair() {
+  await sb.auth.signOut();
+  db = { escolas: [], usuarios: [], turmas: [], alunos: [], provas: [], aplicacoes: [], resultados: [], solicitacoes: [] };
   document.getElementById('conteudo').innerHTML = '';
   telaLogin('entrar');
 }
@@ -187,11 +162,16 @@ function alterarSenha() {
   form.onsubmit = async ev => {
     ev.preventDefault(); // mantém a janela aberta até validar
     const d = Object.fromEntries(new FormData(form)), erro = t => { form.querySelector('#msgsenha').textContent = t; };
-    if (!(await senhaConfere(sessao, d.atual))) return erro('Senha atual incorreta.');
     if (d.nova.length < 6) return erro('A nova senha deve ter pelo menos 6 caracteres.');
     if (d.nova !== d.conf) return erro('As senhas não conferem.');
-    Object.assign(sessao, await criarSenha(d.nova), { trocar: false });
-    salvar(); dlg.close(); alert('Senha alterada com sucesso.');
+    try {
+      const { data: email } = await sb.rpc('email_do_login', { login_param: sessao.login });
+      const { error: erroAtual } = await sb.auth.signInWithPassword({ email, password: d.atual });
+      if (erroAtual) return erro('Senha atual incorreta.');
+      const { error } = await sb.auth.updateUser({ password: d.nova });
+      if (error) return erro('Não foi possível alterar a senha: ' + error.message);
+      dlg.close(); alert('Senha alterada com sucesso.');
+    } catch (e) { erro('Erro: ' + e.message); }
   };
   dlg.showModal();
 }
