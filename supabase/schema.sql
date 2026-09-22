@@ -17,6 +17,7 @@ drop table if exists public.alunos cascade;
 drop table if exists public.turmas cascade;
 drop table if exists public.usuarios cascade;
 drop table if exists public.escolas cascade;
+drop function if exists public.concluir_troca_senha();
 drop function if exists public.solicitar_redefinicao(text);
 drop function if exists public.email_do_login(text);
 drop function if exists public.perfil_criavel(text);
@@ -189,16 +190,35 @@ create policy escolas_update on public.escolas for update to authenticated
 create policy escolas_delete on public.escolas for delete to authenticated
   using (eh_global());
 
--- usuarios: GERENTES veem/criam/editam/excluem, escopados à própria escola
--- (exceto admin/semed, que veem todas) e ao perfil que podem cadastrar.
+-- usuarios: GERENTES veem/editam/excluem, escopados à própria escola
+-- (exceto admin/semed, que veem todas). A CRIAÇÃO não tem política de insert:
+-- só acontece pela Edge Function "criar-usuario", que usa a service_role
+-- (ignora RLS) depois de validar tudo — não há motivo para o cliente
+-- inserir aqui diretamente, e não ter a política fecha essa porta.
 create policy usuarios_select on public.usuarios for select to authenticated
   using (eh_gerente() and (eh_global() or escola = minha_escola()));
-create policy usuarios_insert on public.usuarios for insert to authenticated
-  with check (eh_gerente() and perfil_criavel(perfil) and (eh_global() or escola = minha_escola()));
+-- update: GERENTES editam usuários da própria escola, mas sem poder
+-- escalar o perfil além do que podem cadastrar, nem alterar o próprio
+-- perfil (mesma regra que já existia só no app.js, agora também no banco).
 create policy usuarios_update on public.usuarios for update to authenticated
-  using (eh_gerente() and (eh_global() or escola = minha_escola()));
+  using (eh_gerente() and (eh_global() or escola = minha_escola()))
+  with check (
+    eh_gerente()
+    and perfil_criavel(perfil)
+    and (eh_global() or escola = minha_escola())
+    and (auth_id <> auth.uid() or perfil = meu_perfil())
+  );
 create policy usuarios_delete on public.usuarios for delete to authenticated
   using (eh_gerente() and (eh_global() or escola = minha_escola()) and auth_id <> auth.uid());
+
+-- Permite que qualquer usuário logado marque a própria troca de senha como
+-- concluída (1º acesso ou redefinição), sem depender de ser "gerente" —
+-- sem isso, professores ficavam presos pedindo nova senha para sempre.
+create or replace function public.concluir_troca_senha() returns void
+language sql security definer set search_path = public as $$
+  update usuarios set trocar_senha = false where auth_id = auth.uid()
+$$;
+grant execute on function public.concluir_troca_senha() to authenticated;
 
 -- turmas: todos veem/criam/editam/excluem, escopados à própria escola.
 create policy turmas_select on public.turmas for select to authenticated

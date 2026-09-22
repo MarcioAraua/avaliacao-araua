@@ -119,7 +119,7 @@ function telaLogin(modo = 'entrar', uid = null) {
         if (d.nova !== d.conf) return aviso('As senhas não conferem.');
         const { error: erroSenha } = await sb.auth.updateUser({ password: d.nova });
         if (erroSenha) return aviso('Não foi possível alterar a senha: ' + erroSenha.message);
-        const { error: erroUsuario } = await sb.from('usuarios').update({ trocar_senha: false }).eq('id', uid);
+        const { error: erroUsuario } = await sb.rpc('concluir_troca_senha');
         if (erroUsuario) return aviso('Senha alterada, mas houve um erro ao atualizar o cadastro: ' + erroUsuario.message);
         const { data: { user } } = await sb.auth.getUser();
         entrar(await buscarUsuarioPorAuthId(user.id));
