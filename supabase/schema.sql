@@ -268,15 +268,15 @@ create policy resultados_select on public.resultados for select to authenticated
     select 1 from public.aplicacoes ap where ap.id = aplicacao and escola_da_turma(ap.turma) = minha_escola()
   ));
 create policy resultados_insert on public.resultados for insert to authenticated
-  with check (meu_perfil() in ('admin','diretor','coordenador','professor') and (eh_global() or exists (
+  with check (meu_perfil() in ('admin','semed','diretor','coordenador','professor') and (eh_global() or exists (
     select 1 from public.aplicacoes ap where ap.id = aplicacao and escola_da_turma(ap.turma) = minha_escola()
   )));
 create policy resultados_update on public.resultados for update to authenticated
-  using (meu_perfil() in ('admin','diretor','coordenador','professor') and (eh_global() or exists (
+  using (meu_perfil() in ('admin','semed','diretor','coordenador','professor') and (eh_global() or exists (
     select 1 from public.aplicacoes ap where ap.id = aplicacao and escola_da_turma(ap.turma) = minha_escola()
   )));
 create policy resultados_delete on public.resultados for delete to authenticated
-  using (meu_perfil() in ('admin','diretor','coordenador','professor') and (eh_global() or exists (
+  using (meu_perfil() in ('admin','semed','diretor','coordenador','professor') and (eh_global() or exists (
     select 1 from public.aplicacoes ap where ap.id = aplicacao and escola_da_turma(ap.turma) = minha_escola()
   )));
 

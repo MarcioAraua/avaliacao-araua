@@ -111,7 +111,7 @@ const ENT = {
 const TODOS = Object.keys(PERFIS);
 const GLOBAIS = ['admin', 'semed'];                       // enxergam todas as escolas
 const GERENTES = ['admin', 'semed', 'diretor', 'coordenador'];
-const ESCOLARES = ['admin', 'diretor', 'coordenador', 'professor'];
+const ESCOLARES = ['admin', 'semed', 'diretor', 'coordenador', 'professor'];
 const PERM = {
   escolas:    { ver: GERENTES, criar: ['admin', 'semed'], editar: GERENTES, excluir: ['admin', 'semed'] },
   turmas:     { ver: TODOS, criar: TODOS, editar: TODOS, excluir: TODOS },
