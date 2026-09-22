@@ -181,8 +181,10 @@ alter table public.resultados enable row level security;
 alter table public.solicitacoes enable row level security;
 
 -- escolas: GERENTES veem; admin/semed criam/editam/excluem.
+-- GERENTES veem a lista toda; professor enxerga ao menos a própria escola
+-- (senão o nome da escola não aparece em nenhuma tela pra ele).
 create policy escolas_select on public.escolas for select to authenticated
-  using (eh_gerente());
+  using (eh_gerente() or id = minha_escola());
 create policy escolas_insert on public.escolas for insert to authenticated
   with check (eh_global());
 create policy escolas_update on public.escolas for update to authenticated
@@ -195,8 +197,10 @@ create policy escolas_delete on public.escolas for delete to authenticated
 -- só acontece pela Edge Function "criar-usuario", que usa a service_role
 -- (ignora RLS) depois de validar tudo — não há motivo para o cliente
 -- inserir aqui diretamente, e não ter a política fecha essa porta.
+-- Qualquer usuário enxerga a própria linha (necessário pra completar o
+-- login); GERENTES também enxergam os demais usuários da própria escola.
 create policy usuarios_select on public.usuarios for select to authenticated
-  using (eh_gerente() and (eh_global() or escola = minha_escola()));
+  using (auth_id = auth.uid() or (eh_gerente() and (eh_global() or escola = minha_escola())));
 -- update: GERENTES editam usuários da própria escola, mas sem poder
 -- escalar o perfil além do que podem cadastrar, nem alterar o próprio
 -- perfil (mesma regra que já existia só no app.js, agora também no banco).
@@ -267,14 +271,18 @@ create policy resultados_select on public.resultados for select to authenticated
   using (eh_global() or exists (
     select 1 from public.aplicacoes ap where ap.id = aplicacao and escola_da_turma(ap.turma) = minha_escola()
   ));
+-- (insert/update também confirmam que o aluno é da mesma turma da aplicação,
+-- não só que a aplicação é da escola de quem está corrigindo.)
 create policy resultados_insert on public.resultados for insert to authenticated
-  with check (meu_perfil() in ('admin','semed','diretor','coordenador','professor') and (eh_global() or exists (
-    select 1 from public.aplicacoes ap where ap.id = aplicacao and escola_da_turma(ap.turma) = minha_escola()
-  )));
+  with check (meu_perfil() in ('admin','semed','diretor','coordenador','professor') and exists (
+    select 1 from public.aplicacoes ap join public.alunos al on al.turma = ap.turma
+    where ap.id = aplicacao and al.id = aluno and (eh_global() or escola_da_turma(ap.turma) = minha_escola())
+  ));
 create policy resultados_update on public.resultados for update to authenticated
-  using (meu_perfil() in ('admin','semed','diretor','coordenador','professor') and (eh_global() or exists (
-    select 1 from public.aplicacoes ap where ap.id = aplicacao and escola_da_turma(ap.turma) = minha_escola()
-  )));
+  using (meu_perfil() in ('admin','semed','diretor','coordenador','professor') and exists (
+    select 1 from public.aplicacoes ap join public.alunos al on al.turma = ap.turma
+    where ap.id = aplicacao and al.id = aluno and (eh_global() or escola_da_turma(ap.turma) = minha_escola())
+  ));
 create policy resultados_delete on public.resultados for delete to authenticated
   using (meu_perfil() in ('admin','semed','diretor','coordenador','professor') and (eh_global() or exists (
     select 1 from public.aplicacoes ap where ap.id = aplicacao and escola_da_turma(ap.turma) = minha_escola()
